@@ -1,0 +1,161 @@
+
+-------------------------------------------------------------------CSE 506-------------------------------------------------------------------------------------------------------------------------------------------------READ ME DOCUMENT------------------------------------------------------------------------------------------------------------------------------------------Author: Vinayak Mittal----------------------------------------------------------------------------------------------------------------------------------------- SBU ID: 110385943------------------------------------------------------------------------------
+
+This file contains the usage information of the xcrypt system call. This project contains the following files and are required for successful working of the system call:
+
+1. Makefile
+2. README
+3. install_module.sh
+4. kernel.config
+5. sys_xcrypt.c
+6. sys_xcrypt.h
+7. xcipher.c
+
+The nature of these files are described below in detail:
+
+------------
+1. Makefile |
+------------
+
+This file contains clean and build instructions for user space program and system call. I have made changes in this file to enable compilation for xcipher.c instead of xhw1.c and also appended -lssl -lcrypto to support openssl encyrption for generating MD5 hash.
+
+----------
+2. README |
+----------
+
+Readme file contains information about the usage and other information about system call.
+
+---------------------
+3. install_module.sh |
+---------------------
+
+This is a shell script which is used to insert and remove the loadable module from the kernel.
+
+-----------------
+4. kernel.config |
+-----------------
+
+kernel.config file is the atttempt to load the minimal components of kernel without breaking the normal working of kernel. I have used the information provided at http://www3.cs.stonybrook.edu/~ezk/cse506-f15/lab.html to make the minimal kernel.
+
+----------------
+5. sys_xcrypt.c |
+----------------
+
+sys_xcrypt.c is the main file which links to system call by a function pointer. It takes the following arguments from user space in a void *.
+a. input file
+b. output file
+c. flag
+d. key buffer
+e. key length
+
+After receving the argument from the user, it is first validated to check the authencity by sending it to function validateInput. The validateInput function checks by using access_ok (Link: http://www.fsl.cs.sunysb.edu/kernel-api/re243.html) and pointer validity. If everything is normal, it returns 0 or else returns appropriate error. Once the arguments are validated successfully, the user space arguments are then copied to kernel space by invoking method transferData which takes two arguments - user space variables and kernel space variables. Buffers are allocated for each kernel variable by using kmalloc and then data is transferred using copy_from_user (Link: http://www.fsl.cs.sunysb.edu/kernel-api/re257.html). If all data is successfully transferred, it returns 0 or else an appopriate error is returned. 
+
+After the validation and copying data, it finally calls perform_xcrypt function to perform encrypt/decrypt as specified by the user. 
+
+The working of perform_xcrypt is given in below steps:
+
+-- Allocates a buffer for md5 hash and invokes the method generate_md5 to generate md5 hash of the hashed key received from the user.
+I have referred the following link to generate md5 hash : http://lxr.fsl.cs.sunysb.edu/linux/source/fs/ecryptfs/crypto.c .The function ecryptfs_calculate_md5 is copied from there and changes are made accordingly to suit the program need. 
+
+-- Read and write buffers are allocated in the kernel space for reading and writing data purposes. 
+
+-- File handler for infile is opened and it first checks whether the input file is a regular file or not. 
+
+-- Outfile handler for outfile is opened and it first checks whether there exists already an output file. If it already exists then a flag   isFileToCreate is set to 1 for checking test cases in later steps to avoid deleting it if partial data was encrypted or decrypted. 
+
+-- If input and output file are having the same superblock entry and also share the same inode number, then the process is halted as both the files are same.
+
+-- Then it checks if the output file can be opened in write mode.
+
+-- A temporary file is created in this project for writing encrypted/decrypted data to prevent loss of data in output file. The temporary file is created by the name <output_file_name>.tmp. 
+
+-- Temporary file is set all permissions which are of input file. The following links have helped me in setting the right permissions to temporary file
+
+http://lxr.fsl.cs.sunysb.edu/linux/source/include/linux/fs.h --struct file
+http://lxr.fsl.cs.sunysb.edu/linux/source/include/linux/path.h#L7 --struct path
+http://lxr.fsl.cs.sunysb.edu/linux/source/include/linux/dcache.h#L108 --struct dentry
+http://lxr.fsl.cs.sunysb.edu/linux/source/include/linux/fs.h#L555 --struct inode
+http://lxr.fsl.cs.sunysb.edu/linux/source/include/linux/fs.h#L1226 --struct super_block
+
+-- Read and write offset counters are set to 0. Flag is set to either encrypt or decrypt and file system is set to kernel state.
+
+-- CTR(AES) encryption is hard coded into the system and based on the encrypt or decrypt flag , it performs the following operation.
+	
+	-- FLAG: ENCRYPT
+		- Hashed MD5 key is first written to preamble of temp file. The temp file contains the following structure:
+		0            15 16
+		-------------- --------------------------------
+		HASHED MD5 KEY ENCRYPTED DATA OF THE INPUT FILE
+		-------------- --------------------------------
+		- Data is then read from the input file in PAGE_SIZE using vfs_read (Link: http://lxr.fsl.cs.sunysb.edu/linux/source/fs/read_write.c#L478)
+		  and then written to the temp file using vfs_write (Link: http://lxr.fsl.cs.sunysb.edu/linux/source/fs/read_write.c#L576)
+		- This mode uses the following function to encrypt the data: crypto_aes_encrypt. I have referred code available at http://lxr.fsl.cs.sunysb.edu/linux/source/net/ceph/crypto.c#L163 and modified it to cater to the needs of CTR(AES) encryption.
+		- If the input file is of zero bytes then it generates an output file which contains the preamble containing 16 bytes of hashed MD5 key.
+
+	-- FLAG: DECRYPT
+		- Double hashed MD5 key is first read from the output file and its validity is checked used memcmp.
+		- If both the keys match, then operation is permitted. Otherwise temp file is deleted and process is halted.
+		- The process reads data from output file in PAGE_SIZE using vfs_read, decrypts it and then writes it to temp file.
+		- This mode uses the following function to decrypt the data: crypto_aes_decrypt. I have referred code available at http://lxr.fsl.cs.sunysb.edu/linux/source/net/ceph/crypto.c#L285 and modified it to cater to the needs of CTR(AES) decryption.
+
+-- Upon succesful completion of encryption/decryption, the temp file is renamed to output file using vfs_rename. I have referred code available at http://lxr.fsl.cs.sunysb.edu/linux/source/fs/namei.c#L4109 to understand the functioning of it. 
+
+-- If isFileToCreate was set to 1, then it deletes the old output file using vfs_unlink (Link: http://lxr.fsl.cs.sunysb.edu/linux/source/fs/namei.c#L3718)
+
+
+----------------
+6. sys_xcrypt.h |
+----------------
+
+This file contains the struct of all the variables required by user. It is shared by both user and kernel space. It contains the following variables:
+Input file, output file, key buffer, key length and flags.
+
+-------------
+7. xcipher.c |
+-------------
+
+This is the user level program which is used to invoke the system call. Usage of this program is as follows:
+
+  ----------------------------------------------------------------
+ |Usage: ./xcipher {-p PASSWORD} {-e|-d} [-h HELP] infile outfile |
+  ----------------------------------------------------------------
+
+ - Password has to be of minimum 6 characters long or else it displays an appropriate error and the process is halted.
+ - User has to specify either e or d flag for encryption and decryption respectively.
+ - -h specifies the help message for the user to understand its usage.
+    ------------------------------------------------------------------
+    | Usage: ./xcipher {-p PASSWORD} {-e|-d} [-h HELP] infile outfile |
+    | -p : Specify Password (Min: 6 characters) 	              |
+    | -e : Specify encryption					      |
+    | -d : Specify Decryption                                         |
+    | -h : Display help message                                       |
+    | infile: Input file                                              |
+    | outfile: Output File                                            |
+    -------------------------------------------------------------------
+
+  - infile is used to specify the address of input file.
+  - outfile is used to specify the address of output file.
+
+- The program first takes the required arguments from command line using getopt. I have referred to following tutorial to understand its usage: https://www.cs.rutgers.edu/~pxk/416/notes/c-tutorials/getopt.html.
+
+- MD5 hash is generated of the password specified by the user by using openssl library. 
+
+- Finally, System Call is invoked and arguments are passed to it.
+
+- On successful completion it returns 0 and no message is displayed. However if any error occurs it is displayed using perror.
+I have handled following errors in this program:
+
+-----------------------------------------
+| Error Number 	|      Error name 	|			
+|---------------------------------------|
+|	1 	|	EPERM		|
+|	2 	|	ENOENT		|
+|	5 	|	EIO 		|
+|	9 	|	EBADF 		|
+|	12 	|	ENOMEM		|
+|	14 	|	EFAULT 		|
+|	22 	|	EINVAL		|
+|	30 	|	EROFS		|
+|	36 	|	ENAMETOOLONG 	|
+|	90 	|	EMSGSIZE	|
+-----------------------------------------
